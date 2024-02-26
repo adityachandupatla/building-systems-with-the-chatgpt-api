@@ -1,0 +1,201 @@
+
+LLM:
+
+	A language model is built by using supervised learning (x -> y) to repeatedly predict the next word
+
+	Example:
+
+	sentence: My favorite food is a bagel with cream cheese and lox
+
+	input:
+
+	My favorite food is a
+
+	output:
+
+	bagel
+
+	input:
+
+	My favorite food is a bagel
+
+	output:
+
+	with
+
+	input:
+
+	My favorite food is a bagel with
+
+	output:
+
+	cream
+
+	input:
+
+	My favorite food is a bagel with cream
+
+	output:
+
+	cheese
+
+Getting from a base LLM to instruction tuned LLM:
+
+	Train a base LLM on a lot of data
+
+	Further train the model:
+	- Fine-tune on examples of where the output follows an input instruction
+	- Obtain human-ratings of the quality of different LLM outputs, on criteria such as whether it is helpful, honest and harmless
+	- Tune LLM to increase probability that it generates the more highly rated outputs (using RLHF)
+
+Note: LLM's are trained on tokens and not words. A token is a partial word. If the word is not popular or frequently occurring it is typically broken down into multiple tokens (each of which is frequently occurring).
+
+Unlike supervised learning, where you will get labelled data, train your model, and then deploy it, all of which will likely take at least 6 months to get good results, using an LLM, you can do it in hours/minutes. Simply specify the prompt on a base LLM and call the model to get the response.
+
+Note: GPT-4, due to its powerful nature is capable of being immune to prompt injections which GPT-3 otherwise might not
+
+Chain of thought reasoning: (note: it is still a single big prompt asking the model to think through steps)
+
+	If we want to accomplish a complex task, we can prompt the LLM in multiple steps - giving the model time to "think", i.e., we prompt a substep to the model, get a model response, then we prompt next substep, get further response, and keep doing it until model understands our complex task, and finally expect a response from it.
+
+	This is far better than prompting the model with a single complex prompt where we might not understand what the model reasoned (for the in-between steps)
+
+	In some situations, it would be inappropriate to share the intermediate model results with the user (example: tutoring use-case, we do not want students to become familiar with the model's intermediate reasoning outputs - just so that the students might not guess the final answer)
+
+	Note: The way we accomplish this is, simply write a complex prompt (system message) describing all the steps the model should do. Use a delimiter to separate steps from one another. Finally, ask the response should also contain delimiters so that you can parse the model's response and do whatever you want with it.
+
+Chaining prompts:
+
+	The reason we want this method (instead of the prior one) is because: for a complex task which has inter-step dependencies and for which we need to establish if-else-conditions or loops, it is hard to do it correctly through chain-of-prompt reasoning. Chaining prompts would work exceptionally well.
+
+	Reasoning for using this method:
+
+	1. Most LLM's have context restrictions, i.e., they have caps on input and output tokens so it is better to use this process, instead of chain-of-through-prompting
+
+	2. Additionally, chaining prompts let's use different number of prompts for each usecase, instead of elaborating all world instructions through chain-of-thought-reasoning (where we might not use all instructions)
+
+	We can use information retrieval (with fuzzy search) while we are using this method (i.e., chaining prompts) so that we can incorporate our abritrary domain-knowledge base into Base LLM's.
+
+Checking outputs:
+
+	An interesting use case of LLM's is checking the output of customer service agent's response. Let's say as a company owner you hired 100's of customer service agent's who answer customer's questions if the customer-chat-bot (again based on an LLM) is unable to handle it. You can use another LLM which will take the agent's response to customer as input, and checks whether the agent is responding inaccurately (based on product information you have) or harmfully. (we can use Open AI's moderation API to understand how harmful our content is)
+
+Overall program using chain of prompts (very interesting):
+
+
+def process_user_message(user_input, all_messages, debug=True):
+    delimiter = "```"
+    
+    # Step 1: Check input to see if it flags the Moderation API or is a prompt injection
+    response = openai.Moderation.create(input=user_input)
+    moderation_output = response["results"][0]
+
+    if moderation_output["flagged"]:
+        print("Step 1: Input flagged by Moderation API.")
+        return "Sorry, we cannot process this request."
+
+    if debug: print("Step 1: Input passed moderation check.")
+    
+    category_and_product_response = utils.find_category_and_product_only(user_input, utils.get_products_and_category())
+    #print(print(category_and_product_response)
+    # Step 2: Extract the list of products
+    category_and_product_list = utils.read_string_to_list(category_and_product_response)
+    #print(category_and_product_list)
+
+    if debug: print("Step 2: Extracted list of products.")
+
+    # Step 3: If products are found, look them up
+    product_information = utils.generate_output_string(category_and_product_list)
+    if debug: print("Step 3: Looked up product information.")
+
+    # Step 4: Answer the user question
+    system_message = f"""
+    You are a customer service assistant for a large electronic store. \
+    Respond in a friendly and helpful tone, with concise answers. \
+    Make sure to ask the user relevant follow-up questions.
+    """
+    messages = [
+        {'role': 'system', 'content': system_message},
+        {'role': 'user', 'content': f"{delimiter}{user_input}{delimiter}"},
+        {'role': 'assistant', 'content': f"Relevant product information:\n{product_information}"}
+    ]
+
+    final_response = get_completion_from_messages(all_messages + messages)
+    if debug:print("Step 4: Generated response to user question.")
+    all_messages = all_messages + messages[1:]
+
+    # Step 5: Put the answer through the Moderation API
+    response = openai.Moderation.create(input=final_response)
+    moderation_output = response["results"][0]
+
+    if moderation_output["flagged"]:
+        if debug: print("Step 5: Response flagged by Moderation API.")
+        return "Sorry, we cannot provide this information."
+
+    if debug: print("Step 5: Response passed moderation check.")
+
+    # Step 6: Ask the model if the response answers the initial user query well
+    user_message = f"""
+    Customer message: {delimiter}{user_input}{delimiter}
+    Agent response: {delimiter}{final_response}{delimiter}
+
+    Does the response sufficiently answer the question?
+    """
+    messages = [
+        {'role': 'system', 'content': system_message},
+        {'role': 'user', 'content': user_message}
+    ]
+    evaluation_response = get_completion_from_messages(messages)
+    if debug: print("Step 6: Model evaluated the response.")
+
+    # Step 7: If yes, use this answer; if not, say that you will connect the user to a human
+    if "Y" in evaluation_response:  # Using "in" instead of "==" to be safer for model output variation (e.g., "Y." or "Yes")
+        if debug: print("Step 7: Model approved the response.")
+        return final_response, all_messages
+    else:
+        if debug: print("Step 7: Model disapproved the response.")
+        neg_str = "I'm unable to provide the information you're looking for. I'll connect you with a human representative for further assistance."
+        return neg_str, all_messages
+
+user_input = "tell me about the smartx pro phone and the fotosnap camera, the dslr one. Also what tell me about your tvs"
+response,_ = process_user_message(user_input,[])
+print(response)
+
+Evaluating model responses:
+
+	How will we know that the model responded correctly?
+
+	Solution: We will be using traditional ML methods to verify the models output and also train it to output correct results!
+
+	1. Start off by picking the few examples (user prompts) for which the model responded incorrectly.
+
+	2. Modify the system prompt so that it responds correctly to the user prompt
+
+	3. Ensure that the new prompt does not produce any regression (i.e. works for all the older user prompts)
+
+	4. Job done!
+
+	Note: This is a never-ending iterative process. You will always come up with examples where the model did not respond correctly. Collect the user prompt and build your test-set / cross-validation set. Keep deploying newer versions.
+
+
+
+
+
+
+
+	
+
+
+
+
+	
+
+
+
+
+	
+
+
+
+
+	
